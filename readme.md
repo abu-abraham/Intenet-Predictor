@@ -1,4 +1,4 @@
-## INTENT- PREDICTION
+### INTENT- PREDICTOR
 
 This repository contains the implementation of intent-prediction by analysing videos. Navigate to sub-folders to see their descriptions. 
 
