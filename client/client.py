@@ -1,24 +1,30 @@
-import socket
-import numpy as np
-from PIL import Image
 import cv2
-import _thread as thread
+import io
+import socket
+import struct
+import time
+import pickle
+import zlib
 
-host = '150.203.163.43/24'
-host = 'localhost'
-port = 1234
-buf = 1024
+client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+client_socket.connect(('localhost', 8485))
+connection = client_socket.makefile('wb')
 
-clientsocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-clientsocket.connect((host, port))
+cam = cv2.VideoCapture('videos/video1.mp4')
 
-cap = cv2.VideoCapture('videos/video1.mp4')
-frames=int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-while(True and frames>0):
-    ret, frame = cap.read()
-    clientsocket.send(np.asarray(frame).encode())
-    print(clientsocket.recv(buf).decode())
+img_counter = 0
+encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+frames=int(cam.get(cv2.CAP_PROP_FRAME_COUNT))
+
+while True and frames>0:
+    ret, frame = cam.read()
+    print(frame)
+    result, frame = cv2.imencode('.jpg', frame, encode_param)
+    data = pickle.dumps(frame, 0)
+    size = len(data)
+    client_socket.sendall(struct.pack(">L", size) + data)
+    img_counter += 1
     frames-=1
 
-    
+cam.release()
