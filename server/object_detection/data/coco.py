@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 COCO_ROOT = osp.join(HOME, 'data/coco/')
+print(COCO_ROOT)
 IMAGES = 'images'
 ANNOTATIONS = 'annotations'
 COCO_API = 'PythonAPI'

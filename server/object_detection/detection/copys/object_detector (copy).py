@@ -51,6 +51,9 @@ class ObjectDetector:
 
     def __init__(self):
         print("Object Detector initialized")
+        self._x = 0
+        self._y = 0
+        self._counter = 0
         self.identifier_last_update_frame_map = dict()
         self.identifier_coordinate_map = dict()
         self.identifier_action_map = dict()
@@ -60,8 +63,14 @@ class ObjectDetector:
         self.action_recognizer_execution_thread.start()
         self.net = build_ssd('test', 300, 21)
         self.net.load_weights('/home/abu/Documents/Personal/ImageIdentifier/Intent-Predictor/server/object_detection/weights/ssd300_mAP_77.43_v2.pth')
- 
-    
+        self.object_color_map = {}
+        self.action_color_map = {}
+        self._16x16 = np.zeros(shape=(16,16))
+        self.detected_objects = {}
+        self.lstm_queue = []
+
+    def start(self):
+        print("Object detector initialized!")
 
     def generateUniqueIdentifier(self, coordinates):
         return ((coordinates[0][0]+coordinates[0][1])/(coordinates[1]+coordinates[2]))
@@ -71,7 +80,6 @@ class ObjectDetector:
         #800 is the assumed frame size! should be increased
         diff = 400-abs(int(coords[0][1])-int(coords[0][1]+coords[2]))
         diff = int(diff/2)
-        print(diff)
         #diff = 0
         for i in range(int(coords[0][1])-diff,int(coords[0][1]+coords[2])+diff):
             row = []
@@ -82,7 +90,6 @@ class ObjectDetector:
                 row.append(image[i][j])
             images.append(row)
         images = np.asarray(images)
-        print(images.shape)
         return images
 
 
@@ -90,7 +97,7 @@ class ObjectDetector:
         image.save('filler'+str(self.x)+'.png')
 
     def validDifference(self, cord, coordinates, earlier_coordinates):
-        limit = 25
+        limit = 70
         if abs(coordinates[0][cord]-earlier_coordinates[0][cord])<limit and abs(coordinates[cord+1]-earlier_coordinates[cord+1])< limit:
             return True
         return False
@@ -106,11 +113,11 @@ class ObjectDetector:
     def getComputedAction(self):
         for u_id in self.identifier_image_queue_map:
             if (len(self.identifier_image_queue_map[u_id])>4):
-                detected_action = self.action_recognizer.identifyAction(copy.deepcopy(self.identifier_image_queue_map[u_id]))
-                self.identifier_action_map[u_id] = detected_action
-                self.identifier_image_queue_map[u_id] = [];
+                #detected_action = self.action_recognizer.identifyAction(copy.deepcopy(self.identifier_image_queue_map[u_id]))
+                self.identifier_action_map[u_id] = "running"#detected_action
+                self.identifier_image_queue_map[u_id] = []
 
-    def formattedImage(self, image):
+    def formattedImage(self, image, name = "saved1.png"):
         image = image.transpose(2,0,1)
         leftPad = max(round(float((400 - image.shape[1])) / 2),0)
         rightPad = max(round(float(400 - image.shape[1]) - leftPad),0)
@@ -121,12 +128,19 @@ class ObjectDetector:
         for i,x in enumerate(image):
             cons = np.int(np.median(x))
             x_p = np.pad(x,pads,'constant',constant_values=0)
+            x_p = x_p[:400,:400]
             img_arr[i,:,:] = x_p
+
         image_np = Image.fromarray(np.uint8(img_arr).transpose(1,2,0))
+        im = Image.fromarray(np.uint8(image_np))
+        im.save(name)
         return image_np
 
 
     def detect_objects(self, image):
+        self._x = image.shape[1]
+        self._y = image.shape[0]
+        print("Image shape", image.shape)
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         x = cv2.resize(image, (300, 300)).astype(np.float32)
@@ -136,8 +150,8 @@ class ObjectDetector:
         x = torch.from_numpy(x).permute(2, 0, 1)
 
         xx = Variable(x.unsqueeze(0))
-        if torch.cuda.is_available():
-            xx = xx.cuda()
+        # if torch.cuda.is_available():
+        #     xx = xx.cuda()
         y = self.net(xx)
 
         detections = y.data
@@ -145,17 +159,21 @@ class ObjectDetector:
         detected = {}
         for i in range(detections.size(1)):
             j = 0
-            while detections[0,i,j,0] >= 0.6:
+            print("Detected===",labels[i-1],detections[0,i,j,0])
+            while detections[0,i,j,0] >= 0.6 or (detections[0,i,j,0] >= 0.1 and labels[i-1] in self.detected_objects and self.isSameObject(labels[i-1],(detections[0,i,j,1:]*scale).cpu().numpy())):
                 label_name = labels[i-1]
                 pt = (detections[0,i,j,1:]*scale).cpu().numpy()
                 coords = (pt[0], pt[1]), pt[2]-pt[0]+1, pt[3]-pt[1]+1
                 detected.setdefault(label_name,[]).append([self.getSubImage(coords, image),coords])
-                print(coords)
+                print("Detected, ",labels[i-1],detections[0,i,j,0], coords)
+                self.detected_objects[label_name] = coords
                 j+=1
 
         for key in detected:
             #We are just focused on uniquely identifying people as only human action is recognized now.
             if key != "person":
+                for entry in detected[key]:
+                    self.insertTo16x16(key, entry[1])
                 continue
             for entry in detected[key]:
                 u_id = self.getMappedIdentifier(entry[1])
@@ -163,6 +181,97 @@ class ObjectDetector:
                     u_id = self.generateUniqueIdentifier(entry[1])
                     self.identifier_coordinate_map[u_id] = entry[1]
                 self.identifier_image_queue_map.setdefault(u_id,[]).append(self.formattedImage(entry[0]))
-        return self.identifier_action_map
+                self.insertTo16x16(key, entry[1])
+        self.nextStep()
+        self.save_16x16_as_216x216()
+        self._16x16 = np.zeros(shape=(16,16))
+
+    
+    def segmentedImage(self, image):
+        return
+
+    def isSameObject(self, label, pt):
+        coords = (pt[0], pt[1]), pt[2]-pt[0]+1, pt[3]-pt[1]+1
+        return self.validDifference(0, coords, self.detected_objects[label]) and self.validDifference(1, coords, self.detected_objects[label])
+
+
+    def getReducedCoordinate(self, coordinates):
+        return int(15*(coordinates[0][0]+(coordinates[1]/2))/self._x), int(15*(coordinates[0][1]+(coordinates[2]/2))/self._y)
+
+    def nextStep(self):
+        ##pass and train LSTM model with this 16x16 vector
+        print("Next step")
+        print(self.identifier_action_map)
+
+    def getIndexedValue(self, key, coordinates):
+        if key == 'person':
+            u_id = self.getMappedIdentifier(coordinates)
+            if u_id not in self.identifier_action_map:
+                return 1000-999
+            action = self.identifier_action_map[u_id]-1000+1
+            if action in self.action_color_map:
+                return self.action_color_map.get(action)
+            else:
+                self.action_color_map[action] = (len(self.action_color_map)+1)*1000
+                return self.action_color_map.get(action)
+
+        else:
+            if key in self.object_color_map:
+                return self.object_color_map.get(key)
+            else:
+                self.object_color_map[key] = len(self.object_color_map)+1
+                return self.object_color_map.get(key)
+
+            
+
+    def insertTo16x16(self, key, coordinates):
+        x, y = self.getReducedCoordinate(coordinates)
+        #print("X,y",x,y)
+        if self._16x16[x][y]!=0:
+            x,y = self.nextFreeSpot(x,y)
+        value = self.getIndexedValue(key, coordinates)
+        self._16x16[x][y] = value
+
+    def nextFreeSpot(self, x, y):
+        for i in range(max(0,x-1),min(15,x+1)):
+            for j in range(max(0,y-1),min(15,y+1)):
+                if self._16x16[i][j]==0:
+                    return i,j
+
+
+    def save_16x16_as_216x216(self):
+        if True:
+            temp = self._16x16.reshape((256))
+            self.lstm_queue.append(temp)
+            if len(self.lstm_queue) > 110:
+                data = np.array(self.lstm_queue)
+                torch.save(data, open('traindata.pt', 'wb'))
+                self.lstm_queue = []
+            print("Frame size, ",len(self.lstm_queue))
+            return
+
+        A = np.full((216,216),250)
+        A = np.stack((A,)*3, -1)
+        for i in range(16):
+            for j in range(16):
+                value = self._16x16[i][j]
+                for i1 in range(16*i,16*(i+1)):
+                    for j1 in range(16*i,16*(i+1)):
+                        if value!=0 and value < 1000:
+                            A[i1][j1]=[value,value*10,(value*1000)%255]
+                        elif value!=0:
+                            A[i1][j1] = [value%255,value%100,value%160]
+        im = Image.fromarray(A.astype('uint8'))
+        im.save('output/'+str(self._counter)+'.jpeg')
+        self._counter+=1
+
+        
+
+    
+
+
+        
+
+
 
 
